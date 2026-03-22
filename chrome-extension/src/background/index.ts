@@ -84,9 +84,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 // ── Integrated Telegram Bot ───────────────────────────────────────────────────
-const telegramBot = new TelegramBotService((task, taskId, onStatus) => {
-  handleTelegramTask(task, taskId, onStatus);
-});
+const telegramBot = new TelegramBotService(
+  (task, taskId, onStatus) => {
+    handleTelegramTask(task, taskId, onStatus);
+  },
+  () => {
+    currentExecutor?.cancel();
+  },
+);
 
 telegramBot.init().catch(error => {
   logger.error('Failed to initialize Telegram bot:', error);

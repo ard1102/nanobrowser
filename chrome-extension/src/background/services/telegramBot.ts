@@ -7,6 +7,7 @@ const STEP_FLUSH_MS = 4000;
 const POLL_TIMEOUT_S = 25; // seconds for long-poll
 
 export type TaskExecutor = (task: string, taskId: string, onStatus: StatusCallback) => void;
+export type CancelExecutor = () => void;
 export type StatusCallback = (status: string, text: string) => void;
 
 interface PendingTask {
@@ -20,13 +21,15 @@ export class TelegramBotService {
   private abortController: AbortController | null = null;
   private lastUpdateId = 0;
   private taskExecutor: TaskExecutor;
+  private cancelExecutor: CancelExecutor;
   private pendingTasks = new Map<string, PendingTask>();
   private taskHistory: Array<{ instruction: string; status: string; duration: number }> = [];
   private lastInstruction = new Map<number, string>();
   private stepBuffers = new Map<string, { lines: string[]; timer: ReturnType<typeof setTimeout> | null }>();
 
-  constructor(taskExecutor: TaskExecutor) {
+  constructor(taskExecutor: TaskExecutor, cancelExecutor: CancelExecutor) {
     this.taskExecutor = taskExecutor;
+    this.cancelExecutor = cancelExecutor;
   }
 
   async init() {
@@ -162,8 +165,7 @@ export class TelegramBotService {
     }
 
     if (text === '/stop') {
-      // Abort the current task if any
-      chrome.runtime.sendMessage({ type: 'nb_cancel_task' }).catch(() => {});
+      this.cancelExecutor();
       await this.send(botToken, chatId, '🛑 Abort signal sent.');
       return;
     }
