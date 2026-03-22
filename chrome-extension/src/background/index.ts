@@ -6,7 +6,9 @@ import {
   generalSettingsStore,
   llmProviderStore,
   analyticsSettingsStore,
+  telegramSettingsStore,
 } from '@extension/storage';
+import { TelegramBotService } from './services/telegramBot';
 import { t } from '@extension/i18n';
 import BrowserContext from './browser/context';
 import { Executor } from './agent/executor';
@@ -66,11 +68,108 @@ analyticsSettingsStore.subscribe(() => {
   });
 });
 
-// Listen for simple messages (e.g., from options page)
-chrome.runtime.onMessage.addListener(() => {
-  // Handle other message types if needed in the future
-  // Return false if response is not sent asynchronously
-  // return false;
+// Listen for simple messages (e.g., from options page or content scripts)
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  // DOM fallback path: content script relays 'nanobrowser:telegram:task' DOM events here
+  if (message?.type === 'nb_telegram_task') {
+    handleTelegramTask(message.task, message.taskId);
+    sendResponse({ success: true });
+  }
+  // Cancel task (from Telegram /stop command)
+  if (message?.type === 'nb_cancel_task') {
+    currentExecutor?.cancel();
+    sendResponse({ success: true });
+  }
+  return false;
+});
+
+// ── Integrated Telegram Bot ───────────────────────────────────────────────────
+const telegramBot = new TelegramBotService((task, taskId, onStatus) => {
+  handleTelegramTask(task, taskId, onStatus);
+});
+
+telegramBot.init().catch(error => {
+  logger.error('Failed to initialize Telegram bot:', error);
+});
+
+// React to user toggling the bot on/off from the settings page or side panel
+telegramSettingsStore.subscribe(() => {
+  telegramBot.syncWithStorage().catch(error => {
+    logger.error('Failed to sync Telegram bot state:', error);
+  });
+});
+
+// ── Telegram Bridge ────────────────────────────────────────────────────────
+
+// Shared task runner — called by both the DOM fallback path and the integrated Telegram bot.
+// onStatus callback is optional: when provided (Telegram bot), status updates go back to Telegram.
+function handleTelegramTask(task: string, taskId?: string, onStatus?: (status: string, text: string) => void) {
+  const resolvedTaskId: string = taskId || `tg_${Date.now()}`;
+  (async () => {
+    try {
+      currentExecutor = await setupExecutor(resolvedTaskId, task, browserContext);
+      subscribeToExecutorEvents(currentExecutor);
+
+      currentExecutor.subscribeExecutionEvents(async event => {
+        let status = 'step';
+        let text = event.data.details || '';
+        if (event.state === ExecutionState.TASK_OK) {
+          status = 'completed';
+        } else if (event.state === ExecutionState.TASK_FAIL || event.state === ExecutionState.TASK_CANCEL) {
+          status = 'error';
+        } else if (event.state === ExecutionState.TASK_START) {
+          status = 'started';
+        }
+
+        // Broadcast to all tabs (keeps side panel updated)
+        broadcastToTabs({ type: 'nb_telegram_status', taskId: event.data.taskId, status, text });
+        // Also notify the Telegram bot directly if a callback is provided
+        onStatus?.(status, text);
+      });
+
+      await currentExecutor.execute();
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Unknown error';
+      broadcastToTabs({ type: 'nb_telegram_status', taskId: resolvedTaskId, status: 'error', text });
+      onStatus?.('error', text);
+    }
+  })();
+}
+
+function broadcastToTabs(msg: object) {
+  chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }, tabs => {
+    for (const tab of tabs) {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
+      }
+    }
+  });
+}
+
+// External messages from the Nanobrowser Telegram Bridge sidecar extension.
+chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'PING') {
+    sendResponse({ pong: true });
+    return false;
+  }
+
+  if (message.type === 'ABORT_TASK') {
+    currentExecutor?.cancel();
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (message.type === 'NEW_TASK') {
+    if (!message.task) {
+      sendResponse({ error: 'No task provided' });
+      return false;
+    }
+    handleTelegramTask(message.task, message.taskId);
+    sendResponse({ success: true });
+    return false;
+  }
+
+  return false;
 });
 
 // Setup connection listener for long-lived connections (e.g., side panel)

@@ -1,10 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings } from 'react-icons/fi';
+import { FiSettings, FiSend } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
-import { type Message, Actors, chatHistoryStore, agentModelStore, generalSettingsStore } from '@extension/storage';
+import {
+  type Message,
+  Actors,
+  chatHistoryStore,
+  agentModelStore,
+  generalSettingsStore,
+  telegramSettingsStore,
+} from '@extension/storage';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
@@ -32,6 +39,7 @@ const SidePanel = () => {
   const [isFollowUpMode, setIsFollowUpMode] = useState(false);
   const [isHistoricalSession, setIsHistoricalSession] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [telegramRunning, setTelegramRunning] = useState(false);
   const [favoritePrompts, setFavoritePrompts] = useState<FavoritePrompt[]>([]);
   const [hasConfiguredModels, setHasConfiguredModels] = useState<boolean | null>(null); // null = loading, false = no models, true = has models
   const [isRecording, setIsRecording] = useState(false);
@@ -84,6 +92,15 @@ const SidePanel = () => {
       console.error('Error loading general settings:', error);
       setReplayEnabled(false);
     }
+  }, []);
+
+  // Load and subscribe to Telegram bot status
+  useEffect(() => {
+    telegramSettingsStore.getSettings().then(s => setTelegramRunning(s.isRunning));
+    return telegramSettingsStore.subscribe(async () => {
+      const s = await telegramSettingsStore.getSettings();
+      setTelegramRunning(s.isRunning);
+    });
   }, []);
 
   // Check model configuration on mount
@@ -1047,6 +1064,15 @@ const SidePanel = () => {
               className={`header-icon ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'}`}>
               <RxDiscordLogo size={20} />
             </a>
+            <button
+              type="button"
+              title={telegramRunning ? 'Stop Telegram bot' : 'Start Telegram bot'}
+              onClick={() => telegramSettingsStore.updateSettings({ isRunning: !telegramRunning })}
+              className={`header-icon cursor-pointer ${telegramRunning ? 'text-green-400 hover:text-green-300' : isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'}`}
+              aria-label={telegramRunning ? 'Stop Telegram bot' : 'Start Telegram bot'}
+              tabIndex={0}>
+              <FiSend size={18} />
+            </button>
             <button
               type="button"
               onClick={() => chrome.runtime.openOptionsPage()}
