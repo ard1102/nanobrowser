@@ -5,6 +5,25 @@ const logger = createLogger('TelegramBot');
 
 const STEP_FLUSH_MS = 4000;
 const POLL_TIMEOUT_S = 25; // seconds for long-poll
+const STORAGE_KEY_LAST_UPDATE = 'telegram_last_update_id';
+
+async function loadLastUpdateId(): Promise<number> {
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_KEY_LAST_UPDATE);
+    const val = stored[STORAGE_KEY_LAST_UPDATE];
+    return typeof val === 'number' && val > 0 ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function saveLastUpdateId(id: number): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY_LAST_UPDATE]: id });
+  } catch {
+    // non-fatal
+  }
+}
 
 export type TaskExecutor = (task: string, taskId: string, onStatus: StatusCallback) => void;
 export type CancelExecutor = () => void;
@@ -59,6 +78,9 @@ export class TelegramBotService {
     this.polling = false;
     this.abortController?.abort();
     this.abortController = null;
+    // Clear persisted offset so next start re-drains (don't keep stale offset forever)
+    await chrome.storage.local.remove(STORAGE_KEY_LAST_UPDATE);
+    this.lastUpdateId = 0;
     await telegramSettingsStore.updateSettings({ isRunning: false });
     logger.info('Telegram bot stopped');
   }
@@ -91,17 +113,45 @@ export class TelegramBotService {
   }
 
   private async bootstrapAndPoll(botToken: string, allowed: number[]) {
+    // 1. Try to restore the last processed update_id from persistent storage.
+    //    This survives MV3 service-worker restarts, preventing old messages from
+    //    being re-delivered and causing tasks to re-run.
+    const stored = await loadLastUpdateId();
+    if (stored > 0) {
+      this.lastUpdateId = stored;
+      logger.info(`Resumed polling from stored update_id ${this.lastUpdateId}`);
+      this.pollLoop(botToken, allowed);
+      return;
+    }
+
+    // 2. First-ever start: ask Telegram for the latest pending update_id so we
+    //    don't accidentally process messages that arrived before the bot was set up.
+    //    We call getUpdates with timeout=0 and keep draining until empty.
     try {
-      // Get current latest update_id to avoid re-processing old messages
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?limit=1&offset=-1`, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      const data = await res.json();
-      if (data.ok && data.result?.length > 0) {
-        this.lastUpdateId = data.result[data.result.length - 1].update_id;
+      let offset = 0;
+      for (let i = 0; i < 5; i++) {
+        // max 5 drain rounds to avoid infinite loop
+        const url =
+          `https://api.telegram.org/bot${botToken}/getUpdates?limit=100&timeout=0` +
+          (offset > 0 ? `&offset=${offset}` : '');
+        const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+        const data = await res.json();
+        if (!data.ok || data.result.length === 0) break;
+        const lastId = data.result[data.result.length - 1].update_id as number;
+        offset = lastId + 1;
+        this.lastUpdateId = lastId;
+      }
+      if (this.lastUpdateId > 0) {
+        // Confirm (acknowledge) everything up to lastUpdateId so Telegram clears them
+        await fetch(
+          `https://api.telegram.org/bot${botToken}/getUpdates?limit=1&timeout=0&offset=${this.lastUpdateId + 1}`,
+          { signal: AbortSignal.timeout(10_000) },
+        );
+        await saveLastUpdateId(this.lastUpdateId);
+        logger.info(`Bootstrap drained up to update_id ${this.lastUpdateId}`);
       }
     } catch {
-      // Non-fatal — will just start from 0
+      // Non-fatal — poll from offset 0 (safe, as there may be no old messages)
     }
     this.pollLoop(botToken, allowed);
   }
@@ -123,6 +173,10 @@ export class TelegramBotService {
         for (const update of data.result as TelegramUpdate[]) {
           this.lastUpdateId = update.update_id;
           await this.handleUpdate(update, botToken, allowed);
+        }
+        // Persist after every batch so restarts resume from here
+        if ((data.result as TelegramUpdate[]).length > 0) {
+          await saveLastUpdateId(this.lastUpdateId);
         }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') break;
