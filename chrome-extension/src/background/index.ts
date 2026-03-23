@@ -83,6 +83,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
+// ── Screenshot helper ─────────────────────────────────────────────────────────
+async function captureScreenshot(): Promise<string | null> {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab?.windowId) return null;
+    return await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  } catch (err) {
+    logger.error('captureScreenshot failed:', err);
+    return null;
+  }
+}
+
 // ── Integrated Telegram Bot ───────────────────────────────────────────────────
 const telegramBot = new TelegramBotService(
   (task, taskId, onStatus) => {
@@ -91,6 +103,7 @@ const telegramBot = new TelegramBotService(
   () => {
     currentExecutor?.cancel();
   },
+  () => captureScreenshot(),
 );
 
 telegramBot.init().catch(error => {

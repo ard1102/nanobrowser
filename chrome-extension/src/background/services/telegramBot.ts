@@ -8,6 +8,7 @@ const POLL_TIMEOUT_S = 25; // seconds for long-poll
 
 export type TaskExecutor = (task: string, taskId: string, onStatus: StatusCallback) => void;
 export type CancelExecutor = () => void;
+export type ScreenshotCapture = () => Promise<string | null>; // resolves to a data-URL or null
 export type StatusCallback = (status: string, text: string) => void;
 
 interface PendingTask {
@@ -22,14 +23,16 @@ export class TelegramBotService {
   private lastUpdateId = 0;
   private taskExecutor: TaskExecutor;
   private cancelExecutor: CancelExecutor;
+  private screenshotCapture: ScreenshotCapture;
   private pendingTasks = new Map<string, PendingTask>();
   private taskHistory: Array<{ instruction: string; status: string; duration: number }> = [];
   private lastInstruction = new Map<number, string>();
   private stepBuffers = new Map<string, { lines: string[]; timer: ReturnType<typeof setTimeout> | null }>();
 
-  constructor(taskExecutor: TaskExecutor, cancelExecutor: CancelExecutor) {
+  constructor(taskExecutor: TaskExecutor, cancelExecutor: CancelExecutor, screenshotCapture: ScreenshotCapture) {
     this.taskExecutor = taskExecutor;
     this.cancelExecutor = cancelExecutor;
+    this.screenshotCapture = screenshotCapture;
   }
 
   async init() {
@@ -148,7 +151,7 @@ export class TelegramBotService {
         botToken,
         chatId,
         `👋 <b>Nanobrowser Telegram Control</b>\n\nSend any message to run it as a web task.\n\n` +
-          `/status — connection status\n/stop — abort current task\n/again — repeat last task\n/history — recent tasks`,
+          `/status — connection status\n/stop — abort current task\n/sc — screenshot current page\n/again — repeat last task\n/history — recent tasks`,
       );
       return;
     }
@@ -167,6 +170,17 @@ export class TelegramBotService {
     if (text === '/stop') {
       this.cancelExecutor();
       await this.send(botToken, chatId, '🛑 Abort signal sent.');
+      return;
+    }
+
+    if (text === '/sc') {
+      await this.send(botToken, chatId, '📸 Capturing screenshot…');
+      const dataUrl = await this.screenshotCapture();
+      if (!dataUrl) {
+        await this.send(botToken, chatId, '❌ Screenshot failed — no active tab found.');
+        return;
+      }
+      await this.sendPhoto(botToken, chatId, dataUrl);
       return;
     }
 
@@ -276,6 +290,29 @@ export class TelegramBotService {
       });
     } catch (err) {
       logger.error('sendMessage failed:', err);
+    }
+  }
+
+  private async sendPhoto(botToken: string, chatId: number, dataUrl: string) {
+    try {
+      // Convert data-URL to Blob by fetching it (works in service workers)
+      const blob = await (await fetch(dataUrl)).blob();
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      form.append('photo', blob, 'screenshot.png');
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        logger.error('sendPhoto failed:', data.description);
+        await this.send(botToken, chatId, `❌ Could not send photo: ${data.description}`);
+      }
+    } catch (err) {
+      logger.error('sendPhoto error:', err);
+      await this.send(botToken, chatId, '❌ Screenshot upload failed.');
     }
   }
 
